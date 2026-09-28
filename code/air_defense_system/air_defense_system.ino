@@ -1,175 +1,200 @@
-/*
-  Air Defense / Sentry Radar System
-  ---------------------------------
-  - Servo 1 (Scan Servo) sweeps 180 degrees carrying an ultrasonic sensor.
-  - Servo 2 (Trigger Servo) fires a short action when an object is detected
-    within range.
-  - Green LED = area clear, Red LED + Buzzer = target detected.
-  - Maximum sensing range: 1 meter (100 cm).
-  - Filters out sensor noise: requires 6 consistent readings before
-    confirming a real object (reduces false triggers).
-
-  Hardware:
-    Scan Servo    -> Pin 9
-    Trigger Servo -> Pin 10
-    Ultrasonic TRIG -> Pin 7
-    Ultrasonic ECHO -> Pin 6
-    Green LED     -> Pin 3
-    Red LED       -> Pin 4
-    Buzzer        -> Pin 5
-
-  NOTE: Power both servos from an external 5V supply, with GND common
-  to the Arduino. Do not run two servos off the Uno's onboard 5V pin.
-*/
-
 #include <Servo.h>
-
 Servo scanServo;
 Servo triggerServo;
-
-const int trigPin = 7;
-const int echoPin = 6;
-const int greenLedPin = 3;
-const int redLedPin = 4;
-const int buzzerPin = 5;
-
-const int scanServoPin = 9;
-const int triggerServoPin = 10;
-
-const int detectionRangeCm = 20;   // distance threshold for "target detected"
-const int minValidCm = 8;          // ignore readings closer than this (sensor noise, not a real object)
-const int maxRangeCm = 100;        // maximum sensor range: 1 meter
-const int confirmSamples = 6;      // consistent readings required before confirming a real detection
-const int sweepMin = 15;           // avoid extreme mechanical ends 0/180
-const int sweepMax = 165;
-const int sweepStepDelay = 25;     // ms between each 1-degree step (sweep speed)
-
-int currentAngle = sweepMin;
-int sweepDirection = 1;            // 1 = increasing, -1 = decreasing
-
-void setup() {
-  Serial.begin(9600);
-
-  pinMode(trigPin, OUTPUT);
-  pinMode(echoPin, INPUT);
-  pinMode(greenLedPin, OUTPUT);
-  pinMode(redLedPin, OUTPUT);
-  pinMode(buzzerPin, OUTPUT);
-
-  scanServo.attach(scanServoPin);
-  triggerServo.attach(triggerServoPin);
-
-  triggerServo.write(0);       // resting position
-  scanServo.write(currentAngle);
-
-  digitalWrite(greenLedPin, HIGH);
-  digitalWrite(redLedPin, LOW);
-  noTone(buzzerPin);
-
-  delay(500);
-}
-
-long getDistanceCm() {
+// ---------------- PINS ----------------
+const int trigPin = 7;          // Ultrasonic sensor TRIG pin (sends the pulse)
+const int echoPin = 6;          // Ultrasonic sensor ECHO pin (receives the echo)
+const int greenLedPin = 3;      // Green LED = scanning / searching
+const int redLedPin = 4;        // Red LED = target locked
+const int buzzerPin = 5;      // Buzzer
+const int scanServoPin = 9;   // Signal wire of the scanning serv
+const int triggerServoPin = 10;  // Signal wire of the trigger servo
+// ---------------- SETTINGS ----------------
+// Object must be between these distances 5cm to 100cm
+const int minDistance = 5;
+const int maxDistance = 100;
+// Number of continuous detections required
+const int requiredReadings = 20;
+// Scan range 15dec to 165dec safe for 0 to 180
+const int scanMin = 15;
+const int scanMax = 165;
+// Servo speed
+const int servoDelay = 25;
+// ---------------- VARIABLES ----------------
+int currentAngle = scanMin;   // Current servo angle, starts at 15°
+int direction = 1;            // +1 = sweeping up, -1 = sweeping down
+int detectionCount = 0;       // How many consecutive detections so far
+bool targetLocked = false;    // True when locked onto a target
+bool triggerDone = false;     // Makes sure the trigger fires only once per lock
+unsigned long lastBlinkTime = 0; // Time (ms) of the last red LED toggle
+bool redState = false;          // Current on/off state of the red LED
+// ---------------- ULTRASONIC ----------------
+long getDistance()
+{
   digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
+  delayMicroseconds(3);
   digitalWrite(trigPin, HIGH);
   delayMicroseconds(10);
   digitalWrite(trigPin, LOW);
-
-  // Timeout tuned for ~1m max range (round trip time for 100cm + margin)
-  long duration = pulseIn(echoPin, HIGH, 7000); // 7ms timeout (~1.2m max)
-  if (duration == 0) {
-    return 999; // no echo received within range, treat as "nothing detected"
+  long duration = pulseIn(echoPin, HIGH, 30000);
+  // No echo
+  if (duration == 0)
+  {
+    return 999; //If nothing was detected, the function returns 999 as a "no object" flag.
   }
-  long distanceCm = duration * 0.0343 / 2;
-
-  if (distanceCm > maxRangeCm || distanceCm < minValidCm) {
-    return 999; // out of valid range, or too close to be a real object (noise)
-  }
-  return distanceCm;
+  long distance = duration * 0.0343 / 2;  //Sound travels about 0.0343 cm per µs. The result is divided by 2 because the sound goes to the object and back. The function then returns the distance in cm.
+  return distance;
 }
-
-// Takes several readings in a row and only confirms a detection if they
-// are all consistently within detectionRangeCm. This filters out random
-// noise spikes / stray echoes so only a real, solid object triggers the alert.
-bool isRealObjectDetected(long &confirmedDistance) {
-  int consistentCount = 0;
-  long total = 0;
-
-  for (int i = 0; i < confirmSamples; i++) {
-    long d = getDistanceCm();
-    if (d < detectionRangeCm) {
-      consistentCount++;
-      total += d;
-    }
-    delay(15); // brief pause between samples
-  }
-
-  if (consistentCount == confirmSamples) {
-    confirmedDistance = total / confirmSamples;
-    return true;
-  }
-  return false;
-}
-
-void soundAlert(long distanceCm) {
-  digitalWrite(greenLedPin, LOW);
-  digitalWrite(redLedPin, HIGH);
-  tone(buzzerPin, 1000);
-
-  Serial.print("OBJECT DETECTED! Distance: ");
-  Serial.print(distanceCm);
-  Serial.println(" cm");
-}
-
-void clearAlert() {
-  digitalWrite(greenLedPin, HIGH);
-  digitalWrite(redLedPin, LOW);
-  noTone(buzzerPin);
-}
-
-void fireTriggerServo() {
-  Serial.println("Target locked -> firing trigger servo");
-  triggerServo.write(90);
-  delay(500);
-  triggerServo.write(0);
-  delay(300);
-}
-
-void loop() {
+// ---------------- TARGET LOCK ----------------
+void lockTarget(long distance)
+{
+  targetLocked = true;
+  // Stop scan servo at target angle
   scanServo.write(currentAngle);
-  delay(sweepStepDelay);
-
-  long distance = getDistanceCm();
-  Serial.print("Angle: ");
+  digitalWrite(greenLedPin, LOW);
+  // HIGH BEEP ONLY AFTER TARGET IS CONFIRMED
+  tone(buzzerPin, 3000);
+  // Red LED blinking
+  if (millis() - lastBlinkTime >= 150)
+  {
+    lastBlinkTime = millis();
+    redState = !redState;
+    digitalWrite(redLedPin, redState);
+  }
+  // Trigger servo only once
+  if (!triggerDone)
+  {
+    triggerDone = true;
+    Serial.println("TARGET LOCKED!");
+    Serial.print("Angle: ");
+    Serial.print(currentAngle);
+    Serial.print("  Distance: ");
+    Serial.print(distance);
+    Serial.println(" cm");
+    // Trigger servo
+    triggerServo.write(90);
+    delay(500);
+    triggerServo.write(0);
+  }
+}
+// ---------------- UNLOCK ----------------
+void unlockTarget()
+{
+  if (targetLocked)
+  {
+    Serial.println("TARGET LOST");
+    Serial.println("RESUMING SCAN");
+  }
+  targetLocked = false; // Back to scan mode
+  triggerDone = false;  // Allows the trigger to fire again on the next lock
+  detectionCount = 0; // Reset the counter
+  digitalWrite(greenLedPin, HIGH); // Green on
+  digitalWrite(redLedPin, LOW);  // Red off
+  noTone(buzzerPin);  // Buzzer off
+  redState = false;  // Reset blink state
+}
+// ---------------- SETUP ----------------
+void setup()
+{
+  Serial.begin(9600); //serial monitor  scan
+  pinMode(trigPin, OUTPUT); //  uv pin7 is output
+  pinMode(echoPin, INPUT); //uv eco pin 6 input
+  pinMode(greenLedPin, OUTPUT); //green led pin3  is output
+  pinMode(redLedPin, OUTPUT); //red led pin4 is output
+  pinMode(buzzerPin, OUTPUT); // buzeer  pin 5 is output
+  scanServo.attach(scanServoPin);
+  triggerServo.attach(triggerServoPin);
+  scanServo.write(currentAngle);  // Move to start angle (15°)
+  triggerServo.write(0); // Trigger servo at rest position
+  digitalWrite(greenLedPin, HIGH); // Green on = scanning
+  digitalWrite(redLedPin, LOW);  //red led off
+  noTone(buzzerPin); // buzzer  off
+  Serial.println("RADAR READY"); // Wait 1 s for everything to settle
+  delay(1000);
+}
+// ---------------- MAIN LOOP ----------------
+void loop()
+{
+  // TARGET ALREADY LOCKED
+  if (targetLocked)
+  {
+    // Keep scan servo at target angle
+    scanServo.write(currentAngle);
+    long distance = getDistance();
+    Serial.print("LOCKED | Angle: ");
+    Serial.print(currentAngle);
+    Serial.print(" | Distance: ");
+    if (distance == 999)
+    {
+      Serial.println("NO ECHO");
+    }
+    else
+    {
+      Serial.print(distance);
+      Serial.println(" cm");
+    }
+    // Keep lock only while object remains
+    if (distance >= minDistance &&
+        distance <= maxDistance)
+    {
+      lockTarget(distance); // Still there: keep beeping and blinking
+    }
+    else
+    {
+      unlockTarget();  // Gone: resume scanning
+    }
+    delay(50);
+    return;
+  }
+  
+  // NORMAL SCANNING
+  scanServo.write(currentAngle);
+  delay(servoDelay);
+  long distance = getDistance();
+  Serial.print("SCAN | Angle: ");
   Serial.print(currentAngle);
   Serial.print(" | Distance: ");
-  if (distance >= 999) {
-    Serial.println("out of range");
-  } else {
+  if (distance == 999)
+  {
+    Serial.println("NO OBJECT");
+  }
+  else
+  {
     Serial.print(distance);
     Serial.println(" cm");
   }
-
-  if (distance < detectionRangeCm) {
-    // Possible object - confirm with multiple samples to filter out noise
-    long confirmedDistance;
-    if (isRealObjectDetected(confirmedDistance)) {
-      soundAlert(confirmedDistance);
-      fireTriggerServo();
+  // CHECK FOR POSSIBLE LARGE/STABLE OBJECT
+  if (distance >= minDistance &&
+      distance <= maxDistance)
+  {
+    detectionCount++;
+    Serial.print("Detection count: ");
+    Serial.println(detectionCount);
+    // Only lock after 10 continuous readings
+    if (detectionCount >= requiredReadings)
+    {
+      lockTarget(distance);
     }
-    clearAlert();
-  } else {
-    clearAlert();
   }
+  else
+  {
+    // Noise / no object
+    detectionCount = 0;
+  }
+  // CONTINUE SCANNING
+  if (!targetLocked)
+  {
+    currentAngle += direction;
+    if (currentAngle >= scanMax)
+    {
+      currentAngle = scanMax;
+      direction = -1;
+    }
 
-  // Update sweep angle for next loop iteration
-  currentAngle += sweepDirection;
-  if (currentAngle >= sweepMax) {
-    currentAngle = sweepMax;
-    sweepDirection = -1;
-  } else if (currentAngle <= sweepMin) {
-    currentAngle = sweepMin;
-    sweepDirection = 1;
+    if (currentAngle <= scanMin)
+    {
+      currentAngle = scanMin;
+      direction = 1;
+    }
   }
 }
